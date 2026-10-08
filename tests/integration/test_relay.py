@@ -215,3 +215,54 @@ def test_ctl_and_jump_refuse_a_pos_key_and_tunnel_refuses_an_operator_key(stack:
   assert stack.ssh("ctl", "status", key="pos", timeout=10).returncode == SSH_FAILED
   assert stack.ssh("jump", "-W", f"localhost:{PORT}", key="pos", timeout=10).returncode == SSH_FAILED
   assert stack.ssh("tunnel", "-N", "-R", f"{PORT}:relay:2222", key="alice", timeout=10).returncode == SSH_FAILED
+
+
+def test_close_ends_the_tunnel_and_frees_the_port(stack: Stack):
+  assert stack.ctl("tunnelctl", "close", str(PORT)).returncode == 0
+  wait_for("the tunnel to be killed", lambda: stack.tunnels() == [], timeout=100, every=2)
+  # Killing the [priv] process ended its child and freed the port (design 11).
+  wait_for("the port to be released", lambda: stack.ctl("tunnelctl", "status").stdout.strip() == "[]", timeout=20)
+  assert stack.relay_exec("sh", "-c", f"grep -qi ':{PORT:04X} ' /proc/net/tcp").returncode != 0
+
+
+def test_a_spare_connection_dies_with_its_lease(stack: Stack):
+  assert open_lease(stack, stack.pos2_pub).returncode == 0
+  stack.tunnel(PORT, key="pos2")
+  wait_for("the holder", lambda: '"listening": true' in stack.ctl("tunnelctl", "status", str(PORT)).stdout, timeout=30)
+  stack.tunnel(PORT, key="pos2", exit_on_failure=False)  # logs in, can't bind, stays connected
+  wait_for("both connections", lambda: '"connections": 2' in stack.ctl("tunnelctl", "status", str(PORT)).stdout, timeout=30)
+  assert stack.ctl("tunnelctl", "close", str(PORT)).returncode == 0
+  wait_for("every connection of the lease to die", lambda: stack.tunnels() == [], timeout=100, every=2)
+
+
+def test_logs_reach_the_central_log_server(stack: Stack):
+  wait_for("sshd's login line", lambda: logged(stack, "sshd: Accepted publickey for tunnel"), timeout=30)
+  assert logged(stack, "tunnelctl by alice: open 20001")
+  assert logged(stack, "no lease holds SHA256:")
+
+
+def test_a_stalled_daemon_drops_every_tunnel(stack: Stack):
+  assert open_lease(stack, stack.pos_pub).returncode == 0
+  stack.tunnel(PORT)
+  wait_for("the tunnel", lambda: '"listening": true' in stack.ctl("tunnelctl", "status", str(PORT)).stdout, timeout=30)
+  assert stack.relay_exec("pkill", "-STOP", "-f", "run-app-pos-tunnel-relay").returncode == 0
+  try:
+    # Heartbeat stale after 180 s, then the killer's next minute.
+    wait_for("the killer to fail closed", lambda: stack.tunnels() == [], timeout=330, every=5)
+    status = stack.ssh("ctl", "status", key="alice", timeout=15)
+    assert status.returncode in {75, 124}  # the daemon doesn't answer: "relay starting", or the login itself is held
+  finally:
+    stack.relay_exec("pkill", "-CONT", "-f", "run-app-pos-tunnel-relay")
+
+
+def test_the_container_stops_when_sshd_dies(stack: Stack):
+  stack.relay_exec("pkill", "-f", "sshd: /usr/sbin/sshd")
+  wait_for(
+    "the container to exit",
+    lambda: sh("docker", "inspect", "-f", "{{.State.Running}}", stack.relay).stdout.strip() == "false",
+    timeout=30,
+  )
+  # devkit-container's supervisor ends the run when a daemon exits ([tool.docker].daemons).
+  assert sh("docker", "inspect", "-f", "{{.State.ExitCode}}", stack.relay).stdout.strip() == "1"
+  logs = sh("docker", "logs", stack.relay)
+  assert 'daemon "/usr/sbin/sshd -D -E /run/pos-tunnel/sshd.log" exited' in logs.stdout + logs.stderr
