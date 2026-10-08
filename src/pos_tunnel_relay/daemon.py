@@ -8,19 +8,26 @@ process and with it the container.
 # Standard library imports
 import json
 import logging
+import os
 import re
+import selectors
+import socket
+import struct
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 # First party imports
-from pos_tunnel_relay import const, procfs
+from pos_tunnel_relay import const, keys, procfs
 from pos_tunnel_relay.leases import LeaseError, Leases
+from pos_tunnel_relay.sender import LogSender
 
 if TYPE_CHECKING:
   # Standard library imports
   from collections.abc import Callable
+  from io import FileIO
   from pathlib import Path
 
   # First party imports
@@ -28,6 +35,12 @@ if TYPE_CHECKING:
 
 # The killer runs every minute; a connection that outlives this after its request is asked for again.
 REKILL_SECS = 90
+PASS_SECS = 5
+REQUEST_TIMEOUT = 2.0
+MAX_REQUEST = 65536
+LOG_READ = 65536  # a whole default pipe buffer
+READS_PER_TURN = 100  # so a flood of log lines can't starve the enforcement pass
+PEERCRED = struct.Struct("3i")  # pid, uid, gid
 USAGE = (
   "usage: tunnelctl open <port> <device-id> <idle-seconds> ssh-ed25519 <base64> [--rebuild]"
   " | renew <port> | close <port> | status [<port>]"
@@ -198,3 +211,90 @@ class Daemon:
   def beat(self, now: float) -> None:
     """The heartbeat devkit-container's supervisor reads, written from the loop so a stalled loop stops it."""
     self.heartbeat.write_text(datetime.fromtimestamp(now, UTC).isoformat(), encoding="utf-8")
+
+  def serve(self, stop: Callable[[], bool], roles: dict[int, str]) -> None:
+    """Open `sshd`'s log, bind the request socket, then loop until `stop()`; raises `FatalError`.
+
+    Opening the log is the startup gate: `sshd` waits for a reader before it listens (design 6.3). It is
+    opened read-write because a read-only FIFO polls readable, at EOF, forever once a writer has come and
+    gone (verified on bookworm), which would spin this loop.
+    """
+    with (
+      os.fdopen(os.open(self.sshd_log, os.O_RDWR | os.O_NONBLOCK), "rb", buffering=0) as intake,
+      socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as requests,
+      selectors.DefaultSelector() as selector,
+    ):
+      self.ctl_socket.unlink(missing_ok=True)
+      requests.bind(str(self.ctl_socket))
+      self.ctl_socket.chmod(0o666)  # who may ask what is decided per request, from the caller's uid
+      requests.listen(16)
+      requests.settimeout(0)  # non-blocking
+      selector.register(intake, selectors.EVENT_READ)
+      selector.register(requests, selectors.EVENT_READ)
+      next_pass = 0.0
+      while not stop():
+        for key, _ in selector.select(timeout=1.0):
+          if key.fileobj is intake:
+            self._drain(intake)
+          else:
+            self._answer(requests, roles)
+        now = time.time()
+        if now >= next_pass:
+          self.enforce(int(now))
+          self.check_liveness(now)
+          self.beat(now)
+          next_pass = now + PASS_SECS
+
+  def _drain(self, intake: FileIO) -> None:
+    for _ in range(READS_PER_TURN):
+      data = intake.read(LOG_READ)
+      if not data:  # None: empty for now. Never b"" (EOF): the daemon holds a write end itself.
+        return
+      self.handle_log(data)
+
+  def _answer(self, requests: socket.socket, roles: dict[int, str]) -> None:
+    try:
+      conn, _ = requests.accept()
+    except BlockingIOError:
+      return
+    with conn:
+      conn.settimeout(REQUEST_TIMEOUT)
+      try:
+        _, uid, _ = PEERCRED.unpack(conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, PEERCRED.size))
+        data = b""
+        while not data.endswith(b"\n") and len(data) < MAX_REQUEST:
+          chunk = conn.recv(MAX_REQUEST)
+          if not chunk:
+            break
+          data += chunk
+        reply = self.handle_request(json.loads(data), roles.get(uid), int(time.time()))
+        conn.sendall(json.dumps(reply).encode() + b"\n")
+      except (OSError, ValueError) as e:
+        self.log(logging.WARNING, f"request dropped: {e}")
+
+
+def main(stop: Callable[[], bool]) -> None:
+  """Load state, serve until `stop()`, and exit 1 with the reason on `FatalError` (design 6.5)."""
+  # Standard library imports
+  import pwd
+
+  sender = LogSender(logging.getLogger("pos_tunnel_relay"))
+  leases = Leases(const.LEASES)
+  for problem in leases.load():
+    sender.put(logging.WARNING, f"lease file skipped: {problem}")
+  const.HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
+  daemon = Daemon(
+    leases=leases,
+    log=sender.put,
+    operators=keys.read_operator_names(const.OPERATOR_KEYS),
+  )
+  roles = {pwd.getpwnam("ctl").pw_uid: "ctl", pwd.getpwnam("keyreader").pw_uid: "keys"}
+  sender.put(logging.INFO, f"relay daemon up with {len(leases.by_port)} lease(s)")
+  try:
+    daemon.serve(stop, roles)
+  except FatalError as e:
+    sender.put(logging.CRITICAL, f"relay daemon exiting: {e}")
+    sender.drain(10)
+    print(f"run-app-pos-tunnel-relay: {e}", file=sys.stderr)
+    sys.exit(1)
+  sender.drain(5)
