@@ -1,0 +1,61 @@
+[project]
+  name            = "pos-tunnel-relay"
+  version         = "0.1.0"
+  description     = "The pos-tunnel relay: sshd plus a daemon that owns POS leases, enforcement and logging"
+  readme          = "README.md"
+  requires-python = ">=3.14"
+  # devkit-container 2.2 is the first with [tool.docker].daemons; setup-project keeps raising the floor.
+  dependencies    = ["aeth-ext>=9.0.2", "devkit-container>=2.2.0"]
+
+  [project.scripts]
+    run-app-pos-tunnel-relay = "pos_tunnel_relay.__main__:run_app"
+    relay-startup            = "pos_tunnel_relay.startup:main"
+    relay-killer             = "pos_tunnel_relay.killer:main"
+    tunnelctl                = "pos_tunnel_relay.client:tunnelctl"
+    tunnel-keys              = "pos_tunnel_relay.client:tunnel_keys"
+
+[dependency-groups]
+  dev       = ["aeth-devkit>=15.1.1"]
+  # The central log server the Docker tests run (tests/integration/logserver.Dockerfile).
+  logserver = ["aeth-ext[logserver]>=9.0.2"]
+
+[build-system]
+  requires      = ["uv_build>=0.11.2,<0.12.0"]
+  build-backend = "uv_build"
+
+[tool.docker]
+  services                = ["pos-tunnel-relay"]
+  required_persisted_dirs = ["persisted_data"]
+  # `daemons` implies it; written out so setup-project doesn't insert its `supervise = false` default.
+  supervise               = true
+  wireguard               = false
+  startup_scripts         = ["relay-startup"]
+  # Root, started after relay-startup, beside the daemon; the run ends if either exits (design 6.1).
+  # sshd blocks opening its log, the FIFO relay-startup creates, until the daemon opens it (design 6.3).
+  daemons                 = [["/usr/sbin/sshd", "-D", "-E", "/run/pos-tunnel/sshd.log"], ["/usr/sbin/cron", "-f"]]
+  scrub_env               = ["RELAY_SSH_PRIVATE_KEY", "OPERATOR_KEYS"]
+
+[tool.pyright]
+  # Linux-only code (FIFOs, SO_PEERCRED, /proc); type-check it as such on every host.
+  pythonPlatform = "Linux"
+
+[tool.poe]
+  include_script = [{ script = "aeth_devkit:tasks", executor = { type = "uv", frozen = true } }]
+
+[tool.uv]
+  # aeth-ext[logserver] resolves only for these (textual-web pins an old uvloop on other platforms), as in aeth_ext itself.
+  environments = ["sys_platform == 'linux'", "sys_platform == 'win32'"]
+
+  [tool.uv.sources]
+    aeth-devkit         = [{ index = "SFTPyPI" }]
+    devkit-templates    = [{ index = "SFTPyPI" }]
+    devkit-container    = [{ index = "SFTPyPI" }]
+    devkit-claude-hooks = [{ index = "SFTPyPI" }]
+    devkit-poe-complete = [{ index = "SFTPyPI" }]
+    aeth-ext            = [{ index = "SFTPyPI" }]
+
+  [[tool.uv.index]]
+    name        = "SFTPyPI"
+    url         = "https://pypi.sweetfiretobacco.com/jacob.ogden/internal/+simple"
+    publish-url = "https://pypi.sweetfiretobacco.com/jacob.ogden/internal/"
+    explicit    = true
