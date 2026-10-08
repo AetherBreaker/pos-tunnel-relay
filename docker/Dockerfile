@@ -70,6 +70,9 @@ RUN groupadd --system --gid 999 nonroot \
 
 # Project additions to the final stage; setup-project renders the template around this window.
 # !window final:
+# The relay's daemons (design 6.1). The package's own private keys are removed: the relay's comes
+# from RELAY_SSH_PRIVATE_KEY at each start, never from the image.
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-server cron   && rm -rf /var/lib/apt/lists/* /etc/ssh/ssh_host_*
 # !end final
 
 WORKDIR /app

@@ -7,7 +7,7 @@ services:
       args:
         GIT_REPO: https://github.com/AetherBreaker/pos-tunnel-relay.git
         GIT_TAG: v0.1.0
-    restart: no
+    restart: always
     volumes:
       - type: bind
         source: /data/pos_tunnel_relay_files
@@ -17,6 +17,8 @@ services:
       - ALERTS_EMAIL=info@sweetfiretobacco.com
       - ALERTS_EMAIL_PWD=${ALERTS_EMAIL_PWD:?}
       - ALERTS_RECIPIENTS=["jacob.ogden@sweetfiretobacco.com"]
+      - RELAY_SSH_PRIVATE_KEY=${RELAY_SSH_PRIVATE_KEY:?}
+      - OPERATOR_KEYS=${OPERATOR_KEYS:?}
     networks:
       - coolify
     healthcheck:
@@ -28,6 +30,9 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    # The relay's own (design 6.1). setup-project inserts `restart` only when missing and never
+    # touches `ports`, so these survive every re-render. SSH isn't TLS, so Traefik can't route it.
+    ports: ["2222:2222"]
 
 networks:
   coolify:

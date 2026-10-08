@@ -192,6 +192,9 @@
     [tool.ruff.lint.isort]
       combine-as-imports = true
       known-first-party  = ["pos_tunnel_relay"]
+      # Installed from the index, never a sibling checkout: CI has no ../aeth_ext/src, so both
+      # environments must sort it the same way.
+      known-third-party  = ["aeth_ext"]
 
       [tool.ruff.lint.isort.import-heading]
         first-party      = "First party imports"
