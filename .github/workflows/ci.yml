@@ -1,0 +1,60 @@
+name: "Verify: tests, lint, types, the relay image end to end"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: "Python: pytest, ruff, pyright"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+
+      - name: uv sync
+        run: uv sync
+
+      - name: uv run pytest
+        run: uv run pytest
+
+      # The code only: AGENTS.md is devkit-rendered and ruff would reformat a code block in it.
+      - name: uv run ruff check --no-fix src tests, uv run ruff format --check src tests
+        run: uv run ruff check --no-fix src tests && uv run ruff format --check src tests
+
+      - name: uv run pyright
+        run: uv run pyright
+
+  docker:
+    name: "Docker: the relay image end to end (sshd, daemon, killer)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+
+      - name: uv sync
+        run: uv sync
+
+      - name: POS_RELAY_DOCKER=1 uv run pytest tests/integration --no-cov -v
+        env:
+          POS_RELAY_DOCKER: "1"
+        run: uv run pytest tests/integration --no-cov -v
