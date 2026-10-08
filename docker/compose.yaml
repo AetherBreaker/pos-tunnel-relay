@@ -6,7 +6,7 @@ services:
       dockerfile: docker/Dockerfile
       args:
         GIT_REPO: https://github.com/AetherBreaker/pos-tunnel-relay.git
-        GIT_TAG: v0.1.0
+        GIT_TAG: v1.0.0
     restart: always
     volumes:
       - type: bind
