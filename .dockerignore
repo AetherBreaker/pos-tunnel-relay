@@ -1,0 +1,8 @@
+# Never copy local tooling state, secrets, or build output into the image
+.cache/
+.venv/
+**/__pycache__
+.git
+.vscode
+*.env
+dist/

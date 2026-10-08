@@ -1,0 +1,34 @@
+services:
+  pos-tunnel-relay:
+    container_name: pos-tunnel-relay
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        GIT_REPO: https://github.com/AetherBreaker/pos-tunnel-relay.git
+        GIT_TAG: v0.1.0
+    restart: no
+    volumes:
+      - type: bind
+        source: /data/pos_tunnel_relay_files
+        target: /app/persisted_data
+    environment:
+      - HEARTBEAT_SLUG=pos-tunnel-relay
+      - ALERTS_EMAIL=info@sweetfiretobacco.com
+      - ALERTS_EMAIL_PWD=${ALERTS_EMAIL_PWD:?}
+      - ALERTS_RECIPIENTS=["jacob.ogden@sweetfiretobacco.com"]
+    networks:
+      - coolify
+    healthcheck:
+      test:
+        - CMD
+        - /app/.venv/bin/devkit-container
+        - healthcheck
+      start_period: 15s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  coolify:
+    external: true
