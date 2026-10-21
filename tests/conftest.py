@@ -31,8 +31,11 @@ class FakeProc:
   def remove(self, pid: int) -> None:
     shutil.rmtree(self.root / str(pid))
 
-  def listen(self, port: int) -> None:
-    self._listening.append(port)
+  def listen(self, port: int, *, listening: bool = True) -> None:
+    if listening:
+      self._listening.append(port)
+    else:
+      self._listening.remove(port)
     rows = ["  sl  local_address rem_address   st"]
     rows += [f"   0: 0100007F:{p:04X} 00000000:0000 0A 0:0 0:0 0 0 0 1" for p in self._listening]
     (self.root / "net" / "tcp").write_text("\n".join(rows) + "\n", encoding="utf-8")

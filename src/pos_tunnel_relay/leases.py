@@ -21,7 +21,7 @@ PORT_BASE = 20000  # tunnel port = 20000 + NinjaOne device id (design 4)
 PORT_MAX = 65535
 MAX_IDLE = 12 * 3600
 MAX_LIFE = 72 * 3600
-OPEN_USAGE = "usage: open <port> <device-id> <idle-seconds> ssh-ed25519 <base64> [--rebuild]"
+OPEN_USAGE = "usage: open <port> <device-id> <idle-seconds> ssh-ed25519 <base64> [--rebuild] [--adhoc]"
 OPEN_WORDS = 5  # port, device id, idle seconds, and the key's two words
 
 
@@ -43,6 +43,8 @@ class Lease:
   fingerprint: str
   operator: str
   rebuild: bool = False
+  # Ended once its tunnel drops: an ad hoc device never reconnects. Defaulted so older lease files load.
+  adhoc: bool = False
 
   @property
   def deadline(self) -> int:
@@ -96,9 +98,9 @@ class Leases:
     return lease
 
   def open(self, args: list[str], operator: str, now: int) -> Lease:
-    """`open <port> <device-id> <idle-seconds> ssh-ed25519 <base64> [--rebuild]` (design 6.4)."""
-    rebuild = "--rebuild" in args
-    words = [a for a in args if a != "--rebuild"]
+    """`open <port> <device-id> <idle-seconds> ssh-ed25519 <base64> [--rebuild] [--adhoc]` (design 6.4); flags in any order."""
+    rebuild, adhoc = "--rebuild" in args, "--adhoc" in args
+    words = [a for a in args if a not in {"--rebuild", "--adhoc"}]
     if len(words) != OPEN_WORDS:
       raise LeaseError(OPEN_USAGE)
     port, device_id, idle = (_number(text, name) for text, name in zip(words, ("port", "device-id", "idle-seconds"), strict=False))
@@ -115,7 +117,9 @@ class Leases:
     # sshd uses the first line matching a key, so a second lease's POS would get the first one's port.
     if any(lease.key == key for lease in self.by_port.values()):
       raise LeaseError("another lease holds this key")
-    return self._save(Lease(port, device_id, idle, now, now + idle, now + MAX_LIFE, key, keys.fingerprint(key), operator, rebuild))
+    return self._save(
+      Lease(port, device_id, idle, now, now + idle, now + MAX_LIFE, key, keys.fingerprint(key), operator, rebuild, adhoc)
+    )
 
   def get(self, args: list[str]) -> Lease:
     """The lease `args` (one port) names; `LeaseError` if there is none."""

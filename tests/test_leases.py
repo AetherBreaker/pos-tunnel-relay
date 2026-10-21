@@ -36,7 +36,7 @@ def test_open_records_the_lease_and_its_file(leases: Leases):
   opened(leases)
   lease = leases.by_port[PORT]
   assert (lease.started, lease.idle_deadline, lease.absolute_deadline) == (NOW, NOW + IDLE, NOW + MAX_LIFE)
-  assert (lease.operator, lease.fingerprint, lease.rebuild) == ("alice", keys.fingerprint(KEY), False)
+  assert (lease.operator, lease.fingerprint, lease.rebuild, lease.adhoc) == ("alice", keys.fingerprint(KEY), False, False)
   assert json.loads((leases.directory / f"{PORT}.json").read_text(encoding="utf-8"))["key"] == KEY
 
 
@@ -92,12 +92,32 @@ def test_key_lines_serve_only_live_leases(leases: Leases):
   assert leases.key_lines(NOW + IDLE) == ""
 
 
+@pytest.mark.parametrize(
+  ("flags", "rebuild", "adhoc"),
+  [(["--adhoc"], False, True), (["--rebuild", "--adhoc"], True, True), (["--adhoc", "--rebuild"], True, True)],
+)
+def test_open_takes_its_flags_in_any_order(leases: Leases, flags: list[str], rebuild: bool, adhoc: bool):
+  opened(leases, *flags)
+  assert (leases.by_port[PORT].rebuild, leases.by_port[PORT].adhoc) == (rebuild, adhoc)
+
+
 def test_leases_survive_a_restart(leases: Leases):
-  opened(leases, "--rebuild")
+  opened(leases, "--rebuild", "--adhoc")
   again = Leases(leases.directory)
   assert again.load() == []
   assert again.by_port == leases.by_port
-  assert again.by_port[PORT].rebuild
+  assert (again.by_port[PORT].rebuild, again.by_port[PORT].adhoc) == (True, True)
+
+
+def test_a_lease_file_from_before_adhoc_loads_as_not_adhoc(leases: Leases):
+  opened(leases)
+  path = leases.directory / f"{PORT}.json"
+  path.write_text(
+    json.dumps({k: v for k, v in json.loads(path.read_text(encoding="utf-8")).items() if k != "adhoc"}), encoding="utf-8"
+  )
+  again = Leases(leases.directory)
+  assert again.load() == []
+  assert not again.by_port[PORT].adhoc
 
 
 def test_unreadable_files_are_skipped_and_reported(leases: Leases):

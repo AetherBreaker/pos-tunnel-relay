@@ -1,6 +1,7 @@
 # Standard library imports
 import base64
 import json
+import logging
 import os
 from typing import TYPE_CHECKING
 
@@ -49,8 +50,8 @@ class Setup:
       started=NOW,
     )
 
-  def open(self, key: str = KEY, port: int = PORT) -> dict:
-    argv = ["open", str(port), str(port - 20000), str(IDLE), *key.split()]
+  def open(self, key: str = KEY, port: int = PORT, *flags: str) -> dict:
+    argv = ["open", str(port), str(port - 20000), str(IDLE), *key.split(), *flags]
     return self.daemon.handle_request({"argv": argv, "key": KEY}, "ctl", NOW)
 
   def close(self, port: int, now: int) -> None:
@@ -153,8 +154,12 @@ def test_commands_reply_json_and_are_audited_with_the_operator(s: Setup):
   assert any("tunnelctl by alice: open 20001" in message for _, message in s.logged)
   s.proc.listen(PORT)
   s.connect(PRIV, 500, FP)
+  s.open(KEY2, PORT + 1, "--adhoc")
   listed = json.loads(s.daemon.handle_request({"argv": ["status"], "key": KEY}, "ctl", NOW + 10)["out"])
-  assert [(v["port"], v["listening"], v["idle_remaining"], v["connections"]) for v in listed] == [(PORT, True, IDLE - 10, 1)]
+  assert [(v["port"], v["adhoc"], v["listening"], v["idle_remaining"], v["connections"]) for v in listed] == [
+    (PORT, False, True, IDLE - 10, 1),
+    (PORT + 1, True, False, IDLE - 10, 0),
+  ]
 
 
 def test_refusals_and_bad_requests(s: Setup):
@@ -199,6 +204,21 @@ def test_offering_another_pos_key_gets_only_the_offerer_killed(s: Setup):
   s.close(PORT, NOW + 2)
   s.daemon.enforce(NOW + 2)
   assert s.kills() == [f"{PRIV}-500", f"{OTHER}-700"]  # POS 2's request stays: no killer runs here
+
+
+def test_an_adhoc_lease_ends_at_the_first_pass_after_its_tunnel_drops(s: Setup):
+  s.open(KEY, PORT, "--adhoc")
+  s.open(KEY2, PORT + 1)  # a POS lease: its tunnel drops nightly and comes back
+  s.daemon.enforce(NOW + 1)
+  assert list(s.leases.by_port) == [PORT, PORT + 1]  # not dialled in yet: never listened, so not dropped
+  s.proc.listen(PORT)
+  s.proc.listen(PORT + 1)
+  s.daemon.enforce(NOW + 2)
+  s.proc.listen(PORT, listening=False)
+  s.proc.listen(PORT + 1, listening=False)
+  s.daemon.enforce(NOW + 3)
+  assert list(s.leases.by_port) == [PORT + 1]
+  assert (logging.INFO, f"ad hoc lease for port {PORT} ended: its tunnel dropped") in s.logged
 
 
 def test_a_connection_whose_lease_vanished_is_killed(s: Setup):

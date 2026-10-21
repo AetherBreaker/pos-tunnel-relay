@@ -42,7 +42,7 @@ LOG_READ = 65536  # a whole default pipe buffer
 READS_PER_TURN = 100  # so a flood of log lines can't starve the enforcement pass
 PEERCRED = struct.Struct("3i")  # pid, uid, gid
 USAGE = (
-  "usage: tunnelctl open <port> <device-id> <idle-seconds> ssh-ed25519 <base64> [--rebuild]"
+  "usage: tunnelctl open <port> <device-id> <idle-seconds> ssh-ed25519 <base64> [--rebuild] [--adhoc]"
   " | renew <port> | close <port> | status [<port>]"
 )
 # `%f` for an ed25519 key: SHA-256, unpadded base64.
@@ -96,6 +96,8 @@ class Daemon:
     self.started = time.time() if started is None else started
     self.connections: dict[int, Connection] = {}
     self._requested: dict[tuple[int, int], int] = {}  # (pid, start) -> when its kill was last requested
+    # (port, started) of each ad hoc lease the last pass found listening; `started` so a later lease on the port starts fresh.
+    self._adhoc_up: set[tuple[int, int]] = set()
     self._reported: set[int] = set()
     self._partial = b""
 
@@ -166,6 +168,7 @@ class Daemon:
       "port": lease.port,
       "device_id": lease.device_id,
       "operator": lease.operator,
+      "adhoc": lease.adhoc,
       "started": _iso(lease.started),
       "idle_deadline": _iso(lease.deadline),
       "absolute_deadline": _iso(lease.absolute_deadline),
@@ -177,11 +180,24 @@ class Daemon:
     }
 
   def enforce(self, now: int) -> None:
-    """One pass (design 6.5): forget ended connections, end expired leases, request kills, report strays."""
+    """One pass (design 6.5): forget ended connections, end dropped ad hoc and expired leases, request kills, report strays."""
     for pid, connection in list(self.connections.items()):
       if procfs.start_time(pid, self.proc) != connection.start:
         del self.connections[pid]
         self._requested.pop((pid, connection.start), None)
+    # An ad hoc lease ends at the first pass to find its tunnel down after one found it up; `expire` then removes
+    # it, so remembering the tunnels up at the last pass suffices. Judged by `listening`, never `connections`: a
+    # connection is recorded when a key is merely offered, before auth, so anyone with the device's public key
+    # could end it; listening takes a completed login plus the forward.
+    up = {
+      (lease.port, lease.started) for lease in self.leases.by_port.values() if lease.adhoc and procfs.listening(lease.port, self.proc)
+    }
+    dropped = self._adhoc_up - up
+    for lease in list(self.leases.by_port.values()):  # a copy: `close` replaces entries
+      if (lease.port, lease.started) in dropped and now < lease.deadline:
+        self.leases.close([str(lease.port)], now)
+        self.log(logging.INFO, f"ad hoc lease for port {lease.port} ended: its tunnel dropped")
+    self._adhoc_up = up
     for lease in self.leases.expire(now):
       self.log(logging.INFO, f"lease for port {lease.port} (device {lease.device_id}, opened by {lease.operator}) ended")
     live = {lease.fingerprint for lease in self.leases.by_port.values()}
